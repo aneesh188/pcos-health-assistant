@@ -4,8 +4,8 @@ import { Calendar, Weight, AlertCircle, Download, Info, TrendingUp, Activity } f
 import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
 import { Label } from './components/ui/label';
-import { Card } from './components/ui/card';
 import { Checkbox } from './components/ui/checkbox';
+import { supabase } from '../../supabase';
 
 interface PeriodEntry {
   startDate: string;
@@ -33,7 +33,6 @@ interface ScoreBreakdown {
   metabolicScore: number;
 }
 
-// ─── API result types ───────────────────────────────────────────────
 interface AnalyzeResult {
   score: number;
   riskLevel: string;
@@ -55,7 +54,7 @@ interface CycleResult {
   analysis: string;
 }
 
-export default function App() {
+export default function App({ session }: { session: any }) {
   const [currentPeriodStart, setCurrentPeriodStart] = useState('');
   const [currentPeriodEnd, setCurrentPeriodEnd] = useState('');
   const [weight, setWeight] = useState('');
@@ -64,8 +63,6 @@ export default function App() {
   const [showResults, setShowResults] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isAddingPeriod, setIsAddingPeriod] = useState(false);
-
-  // API results
   const [analyzeResult, setAnalyzeResult] = useState<AnalyzeResult | null>(null);
   const [bmiResult, setBmiResult] = useState<BmiResult | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
@@ -82,22 +79,60 @@ export default function App() {
     fatigue: false,
   });
 
-  // Load period history from localStorage
+  // Load period history from Supabase
   useEffect(() => {
-    const saved = localStorage.getItem('periodHistory');
-    if (saved) setPeriodHistory(JSON.parse(saved));
-  }, []);
+    const loadPeriodHistory = async () => {
+      const { data, error } = await supabase
+        .from('period_records')
+        .select('*')
+        .eq('user_id', session.user.id)
+        .order('created_at', { ascending: true })
+        .limit(6);
 
-  const savePeriodHistory = (history: PeriodEntry[]) => {
-    localStorage.setItem('periodHistory', JSON.stringify(history));
-    setPeriodHistory(history);
-  };
+      if (!error && data) {
+        const mapped = data.map((r: any) => ({
+          startDate: r.start_date,
+          endDate: r.end_date,
+          cycleLength: r.cycle_length,
+          cycleStatus: r.cycle_status,
+        }));
+        setPeriodHistory(mapped);
+      }
+    };
+    loadPeriodHistory();
+  }, [session]);
+
+  // BMI API call
+  useEffect(() => {
+    if (!weight || !height) { setBmiResult(null); return; }
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch('/api/bmi', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ weight: parseFloat(weight), height: parseFloat(height) }),
+        });
+        const data: BmiResult = await res.json();
+        setBmiResult(data);
+      } catch {
+        const w = parseFloat(weight);
+        const h = parseFloat(height) / 100;
+        const bmi = w / (h * h);
+        setBmiResult({
+          bmi: parseFloat(bmi.toFixed(1)),
+          category: bmi < 18.5 ? 'Underweight' : bmi < 25 ? 'Normal' : bmi < 30 ? 'Overweight' : 'Obese',
+          advice: 'Maintain a healthy lifestyle.',
+        });
+      }
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [weight, height]);
 
   const handleSymptomChange = (symptom: keyof Symptoms) => {
     setSymptoms(prev => ({ ...prev, [symptom]: !prev[symptom] }));
   };
 
-  // ─── API: Add Period Entry (calls /api/cycle) ────────────────────
+  // Add Period Entry
   const addPeriodEntry = async () => {
     if (!currentPeriodStart || !currentPeriodEnd) return;
     setIsAddingPeriod(true);
@@ -129,41 +164,22 @@ export default function App() {
       cycleAnalysis: cycleResult?.analysis,
     };
 
+    // Save to Supabase
+    await supabase.from('period_records').insert({
+      user_id: session.user.id,
+      start_date: currentPeriodStart,
+      end_date: currentPeriodEnd,
+      cycle_length: newEntry.cycleLength,
+      cycle_status: newEntry.cycleStatus,
+    });
+
     const updated = [...periodHistory, newEntry].slice(-6);
-    savePeriodHistory(updated);
+    setPeriodHistory(updated);
     setCurrentPeriodStart('');
     setCurrentPeriodEnd('');
     setIsAddingPeriod(false);
   };
 
-  // ─── API: BMI (calls /api/bmi when weight+height change) ─────────
-  useEffect(() => {
-    if (!weight || !height) { setBmiResult(null); return; }
-    const timer = setTimeout(async () => {
-      try {
-        const res = await fetch('/api/bmi', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ weight: parseFloat(weight), height: parseFloat(height) }),
-        });
-        const data: BmiResult = await res.json();
-        setBmiResult(data);
-      } catch (err) {
-        // Fallback to local calculation
-        const w = parseFloat(weight);
-        const h = parseFloat(height) / 100;
-        const bmi = w / (h * h);
-        setBmiResult({
-          bmi: parseFloat(bmi.toFixed(1)),
-          category: bmi < 18.5 ? 'Underweight' : bmi < 25 ? 'Normal' : bmi < 30 ? 'Overweight' : 'Obese',
-          advice: 'Maintain a healthy lifestyle.',
-        });
-      }
-    }, 600);
-    return () => clearTimeout(timer);
-  }, [weight, height]);
-
-  // ─── Local helpers (kept as fallback) ────────────────────────────
   const calculateBMI = () => {
     if (!weight || !height) return 0;
     const w = parseFloat(weight);
@@ -227,7 +243,7 @@ export default function App() {
     return warnings;
   };
 
-  // ─── API: Analyze Risk (calls /api/analyze) ───────────────────────
+  // Analyze Risk
   const handleAnalyze = async () => {
     setIsAnalyzing(true);
     setApiError(null);
@@ -256,6 +272,26 @@ export default function App() {
       });
       const data: AnalyzeResult = await res.json();
       setAnalyzeResult(data);
+
+      // Save to Supabase
+      await supabase.from('symptom_records').insert({
+        user_id: session.user.id,
+        irregular_periods: symptoms.irregularPeriods,
+        no_periods: symptoms.noPeriods,
+        excess_hair: symptoms.excessHair,
+        acne: symptoms.acne,
+        hair_loss: symptoms.hairLoss,
+        dark_patches: symptoms.darkPatches,
+        weight_gain: symptoms.weightGain,
+        difficulty_losing_weight: symptoms.difficultyLosingWeight,
+        fatigue: symptoms.fatigue,
+        weight: parseFloat(weight),
+        height: parseFloat(height),
+        bmi: bmi,
+        risk_score: data.score,
+        risk_level: data.riskLevel,
+      });
+
     } catch (err) {
       console.error('Analyze API error:', err);
       setApiError('Could not reach the server. Showing local results.');
@@ -277,22 +313,16 @@ export default function App() {
     const reportContent = `
 PCOS/PCOD SCREENING REPORT
 Generated: ${new Date().toLocaleDateString()}
+User: ${session.user.email}
 
 PATIENT INFORMATION
 Weight: ${weight} kg | Height: ${height} cm | BMI: ${bmi.toFixed(1)} (${bmiResult?.category ?? ''})
 ${bmiResult?.advice ? `BMI Advice: ${bmiResult.advice}` : ''}
 
-RISK ASSESSMENT (API Result)
-${analyzeResult ? `Score: ${analyzeResult.score}/100
-Risk Level: ${analyzeResult.riskLevel}
-${analyzeResult.recommendation}
+RISK ASSESSMENT
+${analyzeResult ? `Score: ${analyzeResult.score}/100\nRisk Level: ${analyzeResult.riskLevel}\n${analyzeResult.recommendation}\n\nKey Flags:\n${analyzeResult.flags.map(f => `• ${f}`).join('\n')}` : `Score: ${score.total}/100\nRisk Level: ${risk.level}\n${risk.description}`}
 
-Key Flags:
-${analyzeResult.flags.map(f => `• ${f}`).join('\n')}` : `Score: ${score.total}/100\nRisk Level: ${risk.level}\n${risk.description}`}
-
-${cycles ? `CYCLE ANALYSIS
-Average Cycle: ${cycles.avg} days | Range: ${cycles.min}–${cycles.max} days
-Pattern: ${cycles.isIrregular ? 'Irregular' : 'Regular'}` : ''}
+${cycles ? `CYCLE ANALYSIS\nAverage Cycle: ${cycles.avg} days | Range: ${cycles.min}-${cycles.max} days\nPattern: ${cycles.isIrregular ? 'Irregular' : 'Regular'}` : ''}
 
 SYMPTOMS REPORTED
 ${Object.entries(symptoms).filter(([_, v]) => v).map(([k]) => `• ${k.replace(/([A-Z])/g, ' $1').toLowerCase()}`).join('\n')}
@@ -300,14 +330,11 @@ ${Object.entries(symptoms).filter(([_, v]) => v).map(([k]) => `• ${k.replace(/
 PERSONALIZED RECOMMENDATIONS
 ${advice.map(a => `\n${a.title.toUpperCase()}\n${a.tips.map(t => `• ${t}`).join('\n')}`).join('\n')}
 
-${warnings.length > 0 ? `IMPORTANT WARNINGS\n${warnings.map(w => `⚠ ${w}`).join('\n')}` : ''}
+${warnings.length > 0 ? `IMPORTANT WARNINGS\n${warnings.map(w => `! ${w}`).join('\n')}` : ''}
 
 DISCLAIMER
 This is a screening tool only, not a medical diagnosis.
 Please consult a qualified healthcare provider for proper evaluation.
-
-PRIVACY NOTE
-All data is processed locally and via secure serverless functions. No data is stored permanently.
     `;
 
     const blob = new Blob([reportContent], { type: 'text/plain' });
@@ -319,7 +346,6 @@ All data is processed locally and via secure serverless functions. No data is st
     URL.revokeObjectURL(url);
   };
 
-  // ─── Derived values ───────────────────────────────────────────────
   const localScore = calculateScore();
   const displayScore = analyzeResult?.score ?? localScore.total;
   const localRisk = getRiskLevel(localScore.total);
@@ -332,7 +358,6 @@ All data is processed locally and via secure serverless functions. No data is st
   const cycles = analyzeCycles();
   const advice = getPersonalizedAdvice(localScore.breakdown);
   const warnings = checkDoctorWarnings();
-  const bmi = bmiResult?.bmi ?? calculateBMI();
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-pink-50 via-white to-purple-50">
@@ -343,9 +368,18 @@ All data is processed locally and via secure serverless functions. No data is st
             <div className="size-10 rounded-full bg-gradient-to-br from-pink-500 to-purple-600 flex items-center justify-center">
               <Activity className="size-5 text-white" />
             </div>
-            <div>
+            <div className="flex-1">
               <h1 className="text-2xl font-bold text-gray-900">PCOS Health Assistant</h1>
               <p className="text-sm text-gray-600">Evidence-based screening tool</p>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-gray-600 hidden md:block">{session.user.email}</span>
+              <button
+                onClick={() => supabase.auth.signOut()}
+                className="text-sm text-red-600 hover:underline"
+              >
+                Sign Out
+              </button>
             </div>
           </div>
         </div>
@@ -357,7 +391,7 @@ All data is processed locally and via secure serverless functions. No data is st
           className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-start gap-3">
           <Info className="size-5 text-blue-600 flex-shrink-0 mt-0.5" />
           <div className="text-sm text-blue-900">
-            <strong>Privacy First:</strong> Your data is processed securely. We do not store any personal health information.
+            <strong>Privacy First:</strong> Your data is saved securely to your personal account. Only you can see your health data.
           </div>
         </motion.div>
 
@@ -385,7 +419,7 @@ All data is processed locally and via secure serverless functions. No data is st
 
             <Button onClick={addPeriodEntry} disabled={!currentPeriodStart || !currentPeriodEnd || isAddingPeriod}
               className="w-full bg-gradient-to-r from-pink-500 to-purple-600">
-              {isAddingPeriod ? 'Analyzing cycle...' : 'Add Period Entry'}
+              {isAddingPeriod ? 'Saving...' : 'Add Period Entry'}
             </Button>
 
             {periodHistory.length > 0 && (
@@ -430,10 +464,10 @@ All data is processed locally and via secure serverless functions. No data is st
                       <div>
                         <p className="font-medium text-gray-900">Cycle Pattern Analysis</p>
                         <p className="text-sm text-gray-700 mt-1">
-                          Your cycle varies between <strong>{cycles.min}–{cycles.max} days</strong> with an average of <strong>{cycles.avg} days</strong>.
+                          Your cycle varies between <strong>{cycles.min}-{cycles.max} days</strong> with an average of <strong>{cycles.avg} days</strong>.
                           {cycles.isIrregular
-                            ? <span className="text-orange-700"> → Irregular pattern detected</span>
-                            : <span className="text-green-700"> → Regular pattern</span>}
+                            ? <span className="text-orange-700"> Irregular pattern detected</span>
+                            : <span className="text-green-700"> Regular pattern</span>}
                         </p>
                       </div>
                     </div>
@@ -478,7 +512,7 @@ All data is processed locally and via secure serverless functions. No data is st
           </div>
         </motion.section>
 
-        {/* Symptoms Checklist */}
+        {/* Symptoms */}
         <motion.section initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }}>
           <div className="bg-white rounded-xl shadow-sm border p-6 space-y-6">
             <div className="pb-4 border-b">
@@ -538,18 +572,18 @@ All data is processed locally and via secure serverless functions. No data is st
 
             {apiError && (
               <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
-                ⚠ {apiError}
+                ! {apiError}
               </div>
             )}
 
             <Button onClick={handleAnalyze} disabled={isAnalyzing}
               className="w-full bg-gradient-to-r from-pink-500 to-purple-600 text-lg py-6">
-              {isAnalyzing ? '⏳ Analyzing...' : 'Analyze My Risk'}
+              {isAnalyzing ? 'Analyzing...' : 'Analyze My Risk'}
             </Button>
           </div>
         </motion.section>
 
-        {/* Results Section */}
+        {/* Results */}
         <AnimatePresence>
           {showResults && (
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="space-y-8">
@@ -574,7 +608,6 @@ All data is processed locally and via secure serverless functions. No data is st
                 </motion.div>
               )}
 
-              {/* Risk Assessment */}
               <div className="bg-white rounded-xl shadow-sm border p-6 space-y-6">
                 <h2 className="text-xl font-semibold text-gray-900">Risk Assessment</h2>
 
@@ -583,7 +616,7 @@ All data is processed locally and via secure serverless functions. No data is st
                     <span className="text-sm font-medium text-gray-700">PCOS Risk Score</span>
                     <span className="text-2xl font-bold text-gray-900">{displayScore}/100</span>
                   </div>
-                  <div className="h-8 bg-gray-100 rounded-full overflow-hidden relative">
+                  <div className="h-8 bg-gray-100 rounded-full overflow-hidden">
                     <motion.div initial={{ width: 0 }} animate={{ width: `${displayScore}%` }}
                       transition={{ duration: 1, ease: 'easeOut' }}
                       className={`h-full ${displayColor} flex items-center justify-end px-3`}>
@@ -600,7 +633,6 @@ All data is processed locally and via secure serverless functions. No data is st
                   <p className="text-gray-900 leading-relaxed">{displayDescription}</p>
                 </motion.div>
 
-                {/* API flags */}
                 {analyzeResult && analyzeResult.flags.length > 0 && (
                   <div className="p-4 bg-orange-50 border border-orange-200 rounded-lg">
                     <p className="font-medium text-orange-900 mb-2">Detected Indicators:</p>
@@ -634,7 +666,6 @@ All data is processed locally and via secure serverless functions. No data is st
                 </div>
               </div>
 
-              {/* Personalized Advice */}
               {advice.length > 0 && (
                 <div className="bg-white rounded-xl shadow-sm border p-6 space-y-6">
                   <h2 className="text-xl font-semibold text-gray-900">Personalized Recommendations</h2>
@@ -648,7 +679,7 @@ All data is processed locally and via secure serverless functions. No data is st
                         <ul className="space-y-2 pl-4">
                           {category.tips.map((tip, tipIdx) => (
                             <li key={tipIdx} className="text-sm text-gray-700 flex items-start gap-2">
-                              <span className="text-purple-600 mt-0.5">→</span>
+                              <span className="text-purple-600 mt-0.5">-&gt;</span>
                               <span>{tip}</span>
                             </li>
                           ))}
@@ -667,18 +698,18 @@ All data is processed locally and via secure serverless functions. No data is st
           )}
         </AnimatePresence>
 
-        {/* PCOS vs PCOD Info Card */}
+        {/* PCOS vs PCOD */}
         <motion.section initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}>
           <div className="bg-gradient-to-br from-purple-50 to-pink-50 rounded-xl border border-purple-100 p-6 space-y-4">
             <h2 className="text-xl font-semibold text-gray-900">Understanding PCOS vs PCOD</h2>
             <div className="grid md:grid-cols-2 gap-6">
               <div className="space-y-2">
                 <h3 className="font-medium text-purple-900">PCOS (Polycystic Ovary Syndrome)</h3>
-                <p className="text-sm text-gray-700">A metabolic and hormonal disorder where the ovaries produce excess androgens. It's a syndrome affecting multiple body systems including metabolism, fertility, and cardiovascular health.</p>
+                <p className="text-sm text-gray-700">A metabolic and hormonal disorder where the ovaries produce excess androgens. It affects multiple body systems including metabolism, fertility, and cardiovascular health.</p>
               </div>
               <div className="space-y-2">
                 <h3 className="font-medium text-pink-900">PCOD (Polycystic Ovarian Disease)</h3>
-                <p className="text-sm text-gray-700">A condition where the ovaries release immature eggs that develop into cysts. It's primarily an ovarian disorder with less severe metabolic implications than PCOS.</p>
+                <p className="text-sm text-gray-700">A condition where the ovaries release immature eggs that develop into cysts. It is primarily an ovarian disorder with less severe metabolic implications than PCOS.</p>
               </div>
             </div>
             <p className="text-xs text-gray-600 pt-4 border-t border-purple-200">
@@ -691,7 +722,7 @@ All data is processed locally and via secure serverless functions. No data is st
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.5 }}
           className="text-center text-sm text-gray-500 py-8 border-t">
           <p className="mb-2"><strong>Medical Disclaimer:</strong> This tool provides screening information only and is not a substitute for professional medical advice.</p>
-          <p>Based on Rotterdam criteria · For educational purposes · Always consult a qualified healthcare provider</p>
+          <p>Based on Rotterdam criteria - For educational purposes - Always consult a qualified healthcare provider</p>
         </motion.div>
       </div>
     </div>

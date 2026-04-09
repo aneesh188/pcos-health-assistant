@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { useEffect, useState } from "react";
-import { supabase } from "../supabase";
+import { supabase } from "./supabase";
 import App from "./app/App.tsx";
 import Auth from "./app/Auth.tsx";
 import "./styles/index.css";
@@ -26,4 +26,7 @@ function Root() {
     </div>
   );
 
-  return session ? <App session={sessi
+  return session ? <App session={session} /> : <Auth />;
+}
+
+createRoot(document.getElementById("root")!).render(<Root />);
